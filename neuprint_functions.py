@@ -37,8 +37,8 @@ def get_all_neurons_presynaptic_to(bodyId, supertype="KC"):
 
     # This is called a cypher query. It's a way of querying the neuprint database precisely
     # https://neuprint.janelia.org/help/cypherexamples?dataset=hemibrain%3Av1.2.1 go here for more examples
-    where = f"""(a.type CONTAINS "{supertype}")"""
-    q = f" MATCH (a :`hemibrain_Neuron`)-[w :ConnectsTo]->(b :`hemibrain_Neuron`) WHERE {where} AND b.bodyId = \"{bodyId}\" RETURN a.bodyId, a.type"
+    where = f"""(a.type CONTAINS "{supertype}" AND b.bodyId = {bodyId})"""
+    q = f"""MATCH (a:`hemibrain_Neuron`)-[w:ConnectsTo]->(b:`hemibrain_Neuron`) WHERE {where} RETURN a.bodyId, a.type"""
     lh_table = neuprint.fetch_custom(q)
     return lh_table["a.type"].tolist(), lh_table["a.bodyId"].tolist()
 
@@ -73,15 +73,33 @@ def pull_mb_synapses(pre_ids, post_id=612371421, only_mb=True, n_iter=4):
         presynaptic_criteria = neuprint.NeuronCriteria(bodyId=presynaptic_neurons)
         postsynaptic_criteria = neuprint.NeuronCriteria(bodyId=post_id)
         try:
-            synapses = neuprint.fetch_synapse_connections(presynaptic_criteria, postsynaptic_criteria, client=client)
+            synapses = neuprint.fetch_synapse_connections(presynaptic_criteria, postsynaptic_criteria, client=c)
         except Exception as e:
             print("ERROR: ", e)
             print("Failed to get synapses- probably a neuprint timeout, try increasing n_iter")
             
         synapses_df = synapses_df._append(synapses)
-    return synapses_df
+    return synapses_df.reset_index()
 
-def pull_skeleton(body_id, healdist=200, return_kdtree=False):
+def pre_syn_coord_dict(synapses, bodyids, factor=8*(10**(-3))):
+    coordinates = {}
+    for ID in bodyids:
+        coordinates[str(ID)] = []
+    for i in range(len(synapses)):
+        x = int(synapses.loc[i, 'x_post'])
+        y = int(synapses.loc[i, 'y_post'])
+        z = int(synapses.loc[i, 'z_post'])
+        x_scaled = factor * x
+        y_scaled = factor * y
+        z_scaled = factor * z
+        coordinates[str(synapses.loc[i,'bodyId_pre'])].append([x_scaled, y_scaled, z_scaled])
+
+    lengths = []
+    for ID, coords in coordinates.items():
+        lengths.append(len(coords))
+    return coordinates, lengths
+
+def pull_skeleton(body_id, healdist=200, return_kdtree=False, skel_format="pandas"):
     # Skeleton pulling and healing code
     # Another parameter you might like to include is "with_distances=True"
     """
@@ -92,7 +110,7 @@ def pull_skeleton(body_id, healdist=200, return_kdtree=False):
     :param return_kdtree: A boolean indicating whether to return the skeleton as a cKDTree. Default is False.
     :return: A pandas DataFrame representing the skeleton.
     """
-    skel_mbon = neuprint.skeleton.fetch_skeleton(body_id, client=client, heal=healdist)
+    skel_mbon = neuprint.skeleton.fetch_skeleton(body_id, client=c, heal=healdist, format=skel_format)
     # From https://connectome-neuprint.github.io/neuprint-python/docs/client.html#neuprint.client.Client.fetch_skeleton:
     #  If True, a ‘distance’ column (or edge attribute) will be added to the dataframe (or nx.Graph), indicating the distances from each node to its parent node.
 
@@ -106,15 +124,33 @@ def pull_skeleton(body_id, healdist=200, return_kdtree=False):
         return skel_mbon, tree
     return skel_mbon
 
-def graph_from_skeleton(skel):
+def bfs_relabel(skel):
     """
-    Converts a skeleton pandas DataFrame to a networkx graph object.
-    :param skel: A pandas DataFrame representing the skeleton.
-    :return: A networkx graph object representing the skeleton.
+    Performs a breadth-first relabeling on a list of nodes with parent indices.
+    :param node_list: A list of nodes, where each node is a tuple of the node index and its parent index.
+    :return: A list of node indices visited during the search.
     """
-    import networkx as nx
-    skeleton = skel.to_undirected()
-    return skeleton
+    relabel = {}
+    visited = []
+    queue = [1]
+    counter = 1 
+    while queue:
+        node_index = queue.pop(0)
+        if node_index not in visited:
+            visited.append(node_index)
+            neighbors = list(skel.predecessors(node_index))
+            queue.extend(neighbors)
+            relabel[node_index] = counter
+            counter += 1
+    return relabel
 
-def relabel_swc(skel):
-    return skel
+def relabel_skeleton_swc(skel_graph, skel_df):
+    relabel_dict = bfs_relabel(skel_graph)
+    relabel_dict[-1] = -1
+    skel_df.rowId = skel_df.rowId.map(relabel_dict)
+    skel_df.link = skel_df.link.map(relabel_dict)
+    swc = "# rowId type x y z radius link\n"
+    for i in range(skel_df.shape[0]):
+        s = f"{int(skel_df.iloc[i].rowId)} 0 {skel_df.iloc[i].x} {skel_df.iloc[i].y} {skel_df.iloc[i].z} {skel_df.iloc[i].radius} {int(skel_df.iloc[i].link)}\n"
+        swc += s
+    return swc, relabel_dict
