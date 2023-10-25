@@ -42,7 +42,7 @@ def get_all_neurons_presynaptic_to(bodyId, supertype="KC"):
     lh_table = neuprint.fetch_custom(q)
     return lh_table["a.type"].tolist(), lh_table["a.bodyId"].tolist()
 
-def pull_mb_synapses(pre_ids, post_id=612371421, only_mb=True, n_iter=4):
+def pull_synapses(pre_ids=None, post_id=612371421, n_iter=4, pre_or_post="pre"):
     """
     Returns a pandas DataFrame containing synapse information for the given presynaptic neurons and postsynaptic neuron.
     :param client: A neuprint client object.
@@ -53,9 +53,12 @@ def pull_mb_synapses(pre_ids, post_id=612371421, only_mb=True, n_iter=4):
     :return: A pandas DataFrame containing synapse information.
     """
     # Uncomment this line if you only want synapses who are geographically inside the mushroom body
-    if only_mb:
-        is_MB = """AND NOT apoc.convert.fromJsonMap(w.roiInfo)["MB(+ACA)(R)"] IS NULL"""
     synapses_df = pd.DataFrame()
+
+    if pre_or_post == 'both':
+        directions = ['pre', 'post']
+    else:
+        directions = [pre_or_post]
 
     # Replace with your MBON body ID
     # IMPORTANT - make sure you have the right hemisphere
@@ -66,19 +69,28 @@ def pull_mb_synapses(pre_ids, post_id=612371421, only_mb=True, n_iter=4):
     n_neurons = len(pre_ids)
     # Iterating in a list because neuprint has a timeout (maximum time its servers will crunch on your request) that is pretty low
     # So it works bettter if you break the request into a series of smaller requests
-    n_iter = 4
     for i in range(n_iter):
         # To break up the requests, I just divide up the list of KCs
-        presynaptic_neurons = pre_ids[i * n_neurons // n_iter : (i + 1) * n_neurons // n_iter]
-        presynaptic_criteria = neuprint.NeuronCriteria(bodyId=presynaptic_neurons)
-        postsynaptic_criteria = neuprint.NeuronCriteria(bodyId=post_id)
-        try:
-            synapses = neuprint.fetch_synapse_connections(presynaptic_criteria, postsynaptic_criteria, client=c)
-        except Exception as e:
-            print("ERROR: ", e)
-            print("Failed to get synapses- probably a neuprint timeout, try increasing n_iter")
-            
-        synapses_df = synapses_df._append(synapses)
+        if not pre_ids is None:
+            presynaptic_neurons = pre_ids[i * n_neurons // n_iter : (i + 1) * n_neurons // n_iter]
+        
+        for direction in directions:
+            if direction == 'pre':
+                pre = presynaptic_neurons if not pre_ids is None else None
+                post = post_id
+            else:
+                pre = post_id
+                post = presynaptic_neurons if not pre_ids is None else None
+
+            presynaptic_criteria = neuprint.NeuronCriteria(bodyId=pre)
+            postsynaptic_criteria = neuprint.NeuronCriteria(bodyId=post)
+            try:
+                synapses = neuprint.fetch_synapse_connections(presynaptic_criteria, postsynaptic_criteria, client=c)
+            except Exception as e:
+                print("ERROR: ", e)
+                print("Failed to get synapses- probably a neuprint timeout, try increasing n_iter")
+                
+            synapses_df = synapses_df._append(synapses)
     return synapses_df.reset_index()
 
 def pre_syn_coord_dict(synapses, bodyids, factor=8*(10**(-3))):
