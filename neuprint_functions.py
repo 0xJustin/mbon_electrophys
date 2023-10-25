@@ -2,6 +2,8 @@ import neuprint
 import json
 import pandas as pd
 from neuprint import Client
+import networkx as nx
+import numpy as np
 
 token = json.load(open("neuprint_token.json"))["token"]
 if token == "":
@@ -91,6 +93,8 @@ def pull_synapses(pre_ids=None, post_id=612371421, n_iter=4, pre_or_post="pre"):
                 print("Failed to get synapses- probably a neuprint timeout, try increasing n_iter")
                 
             synapses_df = synapses_df._append(synapses)
+    synapses_df.loc[:, "pre_or_post"] = "post"
+    synapses_df.loc[synapses_df["bodyId_pre"] == post_id, "pre_or_post"] = "pre"
     return synapses_df.reset_index()
 
 def pre_syn_coord_dict(synapses, bodyids, factor=8*(10**(-3))):
@@ -166,3 +170,22 @@ def relabel_skeleton_swc(skel_graph, skel_df):
         s = f"{int(skel_df.iloc[i].rowId)} 0 {skel_df.iloc[i].x} {skel_df.iloc[i].y} {skel_df.iloc[i].z} {skel_df.iloc[i].radius} {int(skel_df.iloc[i].link)}\n"
         swc += s
     return swc, relabel_dict
+
+def match_synapses_to_tree(synapses, skel_graph, relabel_dict):
+    from scipy.spatial import cKDTree
+
+    skel_graph = nx.relabel_nodes(skel_graph, relabel_dict)
+    skel_coords = np.array([[skel_graph.nodes[i]["x"], skel_graph.nodes[i]["y"], skel_graph.nodes[i]["z"]] for i in skel_graph.nodes])
+    synapses_coords = np.array([[synapses.loc[i, 'x_post'], synapses.loc[i, 'y_post'], synapses.loc[i, 'z_post']] if synapses.loc[i, 'pre_or_post'] == 'post' else [synapses.loc[i, 'x_pre'], synapses.loc[i, 'y_pre'], synapses.loc[i, 'z_pre']] for i in synapses.index])
+    # Create a cKDTree from synapses_coords
+    skel_tree = cKDTree(skel_coords)
+    # Calculate the distance matrix using synapses_tree and skel_coords
+    dm = skel_tree.query(synapses_coords)[1]
+    node_to_synapses = {}
+    for i, node in enumerate(skel_graph.nodes()):
+        # Find the indices of synapses closest to the current node
+        indices = np.where(dm == i)[0]
+        # Map the current node to the list of indices
+        node_to_synapses[node] = indices
+
+    return dm, node_to_synapses
