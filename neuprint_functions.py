@@ -2,6 +2,8 @@ import neuprint
 import json
 import pandas as pd
 from neuprint import Client
+import networkx as nx
+import numpy as np
 
 token = json.load(open("neuprint_token.json"))["token"]
 if token == "":
@@ -42,7 +44,7 @@ def get_all_neurons_presynaptic_to(bodyId, supertype="KC"):
     lh_table = neuprint.fetch_custom(q)
     return lh_table["a.type"].tolist(), lh_table["a.bodyId"].tolist()
 
-def pull_mb_synapses(pre_ids, post_id=612371421, only_mb=True, n_iter=4):
+def pull_synapses(pre_ids=None, post_id=612371421, n_iter=4, pre_or_post="pre"):
     """
     Returns a pandas DataFrame containing synapse information for the given presynaptic neurons and postsynaptic neuron.
     :param client: A neuprint client object.
@@ -53,9 +55,12 @@ def pull_mb_synapses(pre_ids, post_id=612371421, only_mb=True, n_iter=4):
     :return: A pandas DataFrame containing synapse information.
     """
     # Uncomment this line if you only want synapses who are geographically inside the mushroom body
-    if only_mb:
-        is_MB = """AND NOT apoc.convert.fromJsonMap(w.roiInfo)["MB(+ACA)(R)"] IS NULL"""
     synapses_df = pd.DataFrame()
+
+    if pre_or_post == 'both':
+        directions = ['pre', 'post']
+    else:
+        directions = [pre_or_post]
 
     # Replace with your MBON body ID
     # IMPORTANT - make sure you have the right hemisphere
@@ -66,19 +71,30 @@ def pull_mb_synapses(pre_ids, post_id=612371421, only_mb=True, n_iter=4):
     n_neurons = len(pre_ids)
     # Iterating in a list because neuprint has a timeout (maximum time its servers will crunch on your request) that is pretty low
     # So it works bettter if you break the request into a series of smaller requests
-    n_iter = 4
     for i in range(n_iter):
         # To break up the requests, I just divide up the list of KCs
-        presynaptic_neurons = pre_ids[i * n_neurons // n_iter : (i + 1) * n_neurons // n_iter]
-        presynaptic_criteria = neuprint.NeuronCriteria(bodyId=presynaptic_neurons)
-        postsynaptic_criteria = neuprint.NeuronCriteria(bodyId=post_id)
-        try:
-            synapses = neuprint.fetch_synapse_connections(presynaptic_criteria, postsynaptic_criteria, client=c)
-        except Exception as e:
-            print("ERROR: ", e)
-            print("Failed to get synapses- probably a neuprint timeout, try increasing n_iter")
-            
-        synapses_df = synapses_df._append(synapses)
+        if not pre_ids is None:
+            presynaptic_neurons = pre_ids[i * n_neurons // n_iter : (i + 1) * n_neurons // n_iter]
+        
+        for direction in directions:
+            if direction == 'pre':
+                pre = presynaptic_neurons if not pre_ids is None else None
+                post = post_id
+            else:
+                pre = post_id
+                post = presynaptic_neurons if not pre_ids is None else None
+
+            presynaptic_criteria = neuprint.NeuronCriteria(bodyId=pre)
+            postsynaptic_criteria = neuprint.NeuronCriteria(bodyId=post)
+            try:
+                synapses = neuprint.fetch_synapse_connections(presynaptic_criteria, postsynaptic_criteria, client=c)
+            except Exception as e:
+                print("ERROR: ", e)
+                print("Failed to get synapses- probably a neuprint timeout, try increasing n_iter")
+                
+            synapses_df = synapses_df._append(synapses)
+    synapses_df.loc[:, "pre_or_post"] = "post"
+    synapses_df.loc[synapses_df["bodyId_pre"] == post_id, "pre_or_post"] = "pre"
     return synapses_df.reset_index()
 
 def pre_syn_coord_dict(synapses, bodyids, factor=8*(10**(-3))):
@@ -144,13 +160,32 @@ def bfs_relabel(skel):
             counter += 1
     return relabel
 
-def relabel_skeleton_swc(skel_graph, skel_df):
+def relabel_skeleton_swc(skel_graph, skel_df, row_name="rowId", link_name="link"):
     relabel_dict = bfs_relabel(skel_graph)
     relabel_dict[-1] = -1
-    skel_df.rowId = skel_df.rowId.map(relabel_dict)
-    skel_df.link = skel_df.link.map(relabel_dict)
+    skel_df[row_name] = skel_df[row_name].map(relabel_dict)
+    skel_df[link_name] = skel_df[link_name].map(relabel_dict)
     swc = "# rowId type x y z radius link\n"
     for i in range(skel_df.shape[0]):
-        s = f"{int(skel_df.iloc[i].rowId)} 0 {skel_df.iloc[i].x} {skel_df.iloc[i].y} {skel_df.iloc[i].z} {skel_df.iloc[i].radius} {int(skel_df.iloc[i].link)}\n"
+        s = f"{int(skel_df.iloc[i][row_name])} 0 {skel_df.iloc[i].x} {skel_df.iloc[i].y} {skel_df.iloc[i].z} {skel_df.iloc[i].radius} {int(skel_df.iloc[i][link_name])}\n"
         swc += s
     return swc, relabel_dict
+
+def match_synapses_to_tree(synapses, skel_graph, relabel_dict):
+    from scipy.spatial import cKDTree
+
+    skel_graph = nx.relabel_nodes(skel_graph, relabel_dict)
+    skel_coords = np.array([[skel_graph.nodes[i]["x"], skel_graph.nodes[i]["y"], skel_graph.nodes[i]["z"]] for i in skel_graph.nodes])
+    synapses_coords = np.array([[synapses.loc[i, 'x_post'], synapses.loc[i, 'y_post'], synapses.loc[i, 'z_post']] if synapses.loc[i, 'pre_or_post'] == 'post' else [synapses.loc[i, 'x_pre'], synapses.loc[i, 'y_pre'], synapses.loc[i, 'z_pre']] for i in synapses.index])
+    # Create a cKDTree from synapses_coords
+    skel_tree = cKDTree(skel_coords)
+    # Calculate the distance matrix using synapses_tree and skel_coords
+    dm = skel_tree.query(synapses_coords)[1]
+    node_to_synapses = {}
+    for i, node in enumerate(skel_graph.nodes()):
+        # Find the indices of synapses closest to the current node
+        indices = np.where(dm == i)[0]
+        # Map the current node to the list of indices
+        node_to_synapses[node] = indices
+
+    return dm, node_to_synapses
