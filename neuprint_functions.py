@@ -160,14 +160,14 @@ def bfs_relabel(skel):
             counter += 1
     return relabel
 
-def relabel_skeleton_swc(skel_graph, skel_df):
+def relabel_skeleton_swc(skel_graph, skel_df, row_name="rowId", link_name="link"):
     relabel_dict = bfs_relabel(skel_graph)
     relabel_dict[-1] = -1
-    skel_df.rowId = skel_df.rowId.map(relabel_dict)
-    skel_df.link = skel_df.link.map(relabel_dict)
+    skel_df[row_name] = skel_df[row_name].map(relabel_dict)
+    skel_df[link_name] = skel_df[link_name].map(relabel_dict)
     swc = "# rowId type x y z radius link\n"
     for i in range(skel_df.shape[0]):
-        s = f"{int(skel_df.iloc[i].rowId)} 0 {skel_df.iloc[i].x} {skel_df.iloc[i].y} {skel_df.iloc[i].z} {skel_df.iloc[i].radius} {int(skel_df.iloc[i].link)}\n"
+        s = f"{int(skel_df.iloc[i][row_name])} 0 {skel_df.iloc[i].x} {skel_df.iloc[i].y} {skel_df.iloc[i].z} {skel_df.iloc[i].radius} {int(skel_df.iloc[i][link_name])}\n"
         swc += s
     return swc, relabel_dict
 
