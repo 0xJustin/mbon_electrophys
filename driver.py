@@ -1,6 +1,7 @@
 import neuprint_functions
 import numpy as np
 import json
+import pandas
 
 def main(neuron_id, supertype='KC'):
     types, bodyids = neuprint_functions.get_all_neurons_presynaptic_to(neuron_id, supertype=supertype)
